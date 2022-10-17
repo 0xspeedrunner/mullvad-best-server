@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"sort"
 
 	"github.com/go-ping/ping"
 	"github.com/rs/zerolog"
@@ -18,9 +19,11 @@ import (
 
 func main() {
 	var outputFlag = flag.String("o", "", "Output format. 'json' outputs server json")
+	var topFlag = flag.Int("p", 10, "Top n server output")
 	var countryFlag = flag.String("c", "ch", "Server country code, e.g. ch for Switzerland")
 	var typeFlag = flag.String("t", "wireguard", "Server type, e.g. wireguard")
 	var logLevel = flag.String("l", "info", "Log level. Allowed values: trace, debug, info, warn, error, fatal, panic")
+	var stbootFlag = flag.Bool("st", true, "Only select diskless servers. Default: True")
 	flag.Parse()
 
 	level, err := zerolog.ParseLevel(*logLevel)
@@ -29,29 +32,43 @@ func main() {
 	}
 	zerolog.SetGlobalLevel(level)
 	servers := getServers(*typeFlag)
-	bestIndex := selectBestServerIndex(servers, *countryFlag)
-	if bestIndex == -1 {
-		log.Fatal().Str("country", *countryFlag).Msg("No servers for country found.")
-	}
-	best := servers[bestIndex]
-	log.Debug().Interface("server", best).Msg("Best latency server found.")
-	hostname := strings.TrimSuffix(best.Hostname, "-wireguard")
-	if *outputFlag != "json" {
-		fmt.Println(hostname)
-	} else {
-		serverJson, err := json.Marshal(best)
-		if err != nil {
-			log.Fatal().Err(err).Msg("Couldn't marshal server information to Json")
+	// TODO Remove BestServerIndex to get top n servers
+	if *topFlag == 1 {
+		bestIndex := selectBestServerIndex(servers, *countryFlag, *stbootFlag)
+		if bestIndex == -1 {
+			log.Fatal().Str("country", *countryFlag).Msg("No servers for country found.")
 		}
-		fmt.Println(string(serverJson))
+		best := servers[bestIndex]
+		log.Debug().Interface("server", best).Msg("Best latency server found.")
+		hostname := strings.TrimSuffix(best.Hostname, "-wireguard")
+		if *outputFlag == "json" {
+			serverJson, err := json.Marshal(best)
+			if err != nil {
+				log.Fatal().Err(err).Msg("Couldn't marshal server information to Json")
+			}
+			fmt.Println(string(serverJson))
+		} else {
+			fmt.Println(hostname)
+		}
+	} else {
+		bestServers := selectBestServers(servers, *countryFlag, *stbootFlag, *topFlag)
+		for _, server := range bestServers {
+			serverJson, err := json.Marshal(server)
+			if err != nil {
+				log.Fatal().Err(err).Msg("Couldn't marshal server information to Json")
+			}
+			fmt.Println(string(serverJson))
+		}
 	}
 }
 
-func selectBestServerIndex(servers []server, country string) int {
+func selectBestServerIndex(servers []server, country string, stboot bool) int {
 	bestIndex := -1
 	var bestPing time.Duration
 	for i, server := range servers {
-		if server.Active && server.CountryCode == country {
+// Make country flag optional - don't remove entirely
+//		if server.Active && server.CountryCode == country && server.Stboot{
+		if server.Active && server.Stboot{
 			duration, err := serverLatency(server)
 			if err == nil {
 				if bestIndex == -1 || bestPing > duration {
@@ -64,6 +81,31 @@ func selectBestServerIndex(servers []server, country string) int {
 		}
 	}
 	return bestIndex
+}
+
+func selectBestServers(servers []server, country string, stboot bool, topFlag int) []serverDuration {
+
+	var sortedServers []serverDuration
+//	sortedServers = make([]serverDuration, topFlag)
+//	var bestPing time.Duration
+	for _, server := range servers {
+// TODO: Make country flag optional - don't remove entirely
+//		if server.Active && server.CountryCode == country && server.Stboot{
+		if server.Active && server.Stboot{
+
+			duration, err := serverLatency(server)
+			if err == nil {
+				sortedServers = append(sortedServers, serverDuration{server, duration})
+			} else {
+				log.Err(err).Msg("Error determining the server latency via ping.")
+			}
+		}
+	}
+	log.Debug().Msg("Pulled all servers")
+	sort.SliceStable(sortedServers, func(i, j int) bool {
+		return sortedServers[i].Duration < sortedServers[j].Duration
+	})
+	return sortedServers[:topFlag]
 }
 
 func getServers(serverType string) []server {
@@ -91,6 +133,7 @@ func getServers(serverType string) []server {
 
 //goland:noinspection GoBoolExpressions
 func serverLatency(s server) (time.Duration, error) {
+	log.Debug().Str("Server", s.Hostname).Msg("Upcoming Server to Ping")
 	pinger, err := ping.NewPinger(s.Ipv4AddrIn)
 	if runtime.GOOS == "windows" {
 		pinger.SetPrivileged(true)
@@ -104,8 +147,15 @@ func serverLatency(s server) (time.Duration, error) {
 		log.Debug().Str("Server", s.Hostname).IPAddr("IP", pkt.IPAddr.IP).Dur("RTT", pkt.Rtt).Msg("Added server latency.")
 		duration = pkt.Rtt
 	}
+	pinger.Timeout = time.Second
 	err = pinger.Run()
-	return duration, err
+	if duration == 0 {
+		return pinger.Timeout, err
+	} else {
+		return duration, err
+	}
+	
+
 }
 
 type server struct {
@@ -123,4 +173,10 @@ type server struct {
 	Pubkey           string `json:"pubkey"`
 	MultihopPort     int    `json:"multihop_port"`
 	SocksName        string `json:"socks_name"`
+	Stboot			 bool	`json:"stboot"`
+}
+
+type serverDuration struct {
+	Server server
+	Duration time.Duration
 }

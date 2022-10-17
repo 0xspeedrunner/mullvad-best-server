@@ -51,7 +51,7 @@ endif
 .PHONY: run
 run:
 	@echo "==> Running $(PROJECT_NAME)"
-	@go run main.go
+	@go run main.go $(ARGS)
 
 help: Makefile
 	@echo "Usage: make <command>"
